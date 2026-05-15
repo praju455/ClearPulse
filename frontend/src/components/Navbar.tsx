@@ -38,8 +38,8 @@ export default function Navbar() {
                     {isSignedIn ? (
                         <>
                             <Link href="/triage" className="text-sm font-medium text-blue-500 hover:text-blue-600 transition-colors bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100">Triage Chat</Link>
-                            <Link href="/patient" className="text-sm text-gray-400 hover:text-white transition-colors">Patient</Link>
-                            <Link href="/doctor" className="text-sm text-gray-400 hover:text-white transition-colors">Doctor</Link>
+                            <Link href="/patient" className="text-sm font-medium text-gray-500 hover:text-gray-900 active:text-gray-900 transition-colors">Patient</Link>
+                            <Link href="/doctor" className="text-sm font-medium text-gray-500 hover:text-gray-900 active:text-gray-900 transition-colors">Doctor</Link>
                             <div className="flex items-center gap-3">
                                 <UserButton />
                             </div>
