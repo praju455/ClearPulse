@@ -99,6 +99,12 @@ async def upsert_doctor_profile(wallet: str, payload: DoctorProfilePayload):
             await db_insert("doctor_profiles", data)
         return {"success": True}
     except Exception as e:
+        if _is_database_unavailable(e):
+            return {
+                "success": False,
+                "service_status": "temporarily_unavailable",
+                "message": "Profile service is temporarily unavailable. Please try again in a few minutes.",
+            }
         raise HTTPException(status_code=500, detail=f"Failed to save profile: {str(e)}")
 
 @router.get("/doctor/grants/{wallet}")

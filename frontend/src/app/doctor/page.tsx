@@ -965,7 +965,11 @@ export default function DoctorDashboard() {
                                         <button
                                             onClick={async () => {
                                                 try {
-                                                    const res = await fetch(`/api/calendar/auth?wallet=${address}`);
+                                                    let apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+                                                    if (apiUrl && !apiUrl.startsWith('http://') && !apiUrl.startsWith('https://')) {
+                                                        apiUrl = 'http://' + apiUrl;
+                                                    }
+                                                    const res = await fetch(`${apiUrl}/api/integrations/calendar/auth?wallet=${address}`);
                                                     const { url } = await res.json();
                                                     if (url) window.location.href = url;
                                                 } catch (err) {
