@@ -33,51 +33,35 @@ const SUPPORTED_LANGUAGES = [
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
-// ─── WAV encoder ─────────────────────────────────────────────────────────────
-// Converts any browser-recorded blob (webm/mp4/ogg) into standard WAV PCM 16-bit
-// which Sarvam STT accepts reliably on every browser.
-async function convertBlobToWav(blob: Blob): Promise<Blob> {
-    const audioCtx = new AudioContext({ sampleRate: 16000 });
-    const arrayBuffer = await blob.arrayBuffer();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    await audioCtx.close();
-
-    const numChannels = 1; // mono
-    const sampleRate = audioBuffer.sampleRate;
-    const samples = audioBuffer.getChannelData(0); // use first channel
+// Writes raw Float32 PCM samples directly to a WAV blob (no decoding needed)
+function pcmToWav(samples: Float32Array, sampleRate: number): Blob {
     const length = samples.length;
-
     const wavBuffer = new ArrayBuffer(44 + length * 2);
     const view = new DataView(wavBuffer);
-
     const write = (offset: number, str: string) => {
         for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
     };
-
     write(0, 'RIFF');
     view.setUint32(4, 36 + length * 2, true);
     write(8, 'WAVE');
     write(12, 'fmt ');
-    view.setUint32(16, 16, true);       // chunk size
+    view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);        // PCM
-    view.setUint16(22, numChannels, true);
+    view.setUint16(22, 1, true);        // mono
     view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true); // byte rate
-    view.setUint16(32, 2, true);        // block align
-    view.setUint16(34, 16, true);       // bits per sample
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
     write(36, 'data');
     view.setUint32(40, length * 2, true);
-
     let offset = 44;
     for (let i = 0; i < length; i++) {
         const s = Math.max(-1, Math.min(1, samples[i]));
         view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
         offset += 2;
     }
-
     return new Blob([wavBuffer], { type: 'audio/wav' });
 }
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 interface TriagePanelProps {
@@ -106,8 +90,11 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
     const [ttsEnabled, setTtsEnabled] = useState(false);
     const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
+    // ScriptProcessor-based recorder refs (raw PCM — no MediaRecorder fragmentation issues)
+    const audioCtxRef = useRef<AudioContext | null>(null);
+    const processorRef = useRef<ScriptProcessorNode | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const pcmSamplesRef = useRef<Float32Array[]>([]);
     const endOfMessagesRef = useRef<HTMLDivElement>(null);
     const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -146,41 +133,30 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
         setIsPlayingAudio(false);
     };
 
-    // ─── STT recording ────────────────────────────────────────────────────
+    // ─── STT recording (ScriptProcessorNode — captures raw PCM, builds WAV directly) ──
     const startRecording = async () => {
         setSttError('');
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const audioCtx = new AudioContext({ sampleRate: 16000 } as any);
+            const source = audioCtx.createMediaStreamSource(stream);
+            // bufferSize 4096 = ~256ms per callback at 16kHz
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const processor = (audioCtx as any).createScriptProcessor(4096, 1, 1) as ScriptProcessorNode;
 
-            // Pick any supported format — we'll convert to WAV before sending
-            let mimeType = '';
-            if (typeof MediaRecorder.isTypeSupported === 'function') {
-                if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
-                else if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
-                else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
-            }
-
-            const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-            audioChunksRef.current = [];
-            recorder.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-            recorder.onstop = async () => {
-                stream.getTracks().forEach(t => t.stop());
-                const rawBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-                if (rawBlob.size < 500) {
-                    setSttError('Recording was too short. Please hold and speak clearly.');
-                    return;
-                }
-                try {
-                    // Convert to WAV — Sarvam accepts this format on every browser
-                    const wavBlob = await convertBlobToWav(rawBlob);
-                    await transcribeAudio(wavBlob);
-                } catch (convErr) {
-                    console.error('WAV conversion failed, sending raw:', convErr);
-                    await transcribeAudio(rawBlob); // fallback: send raw
-                }
+            pcmSamplesRef.current = [];
+            processor.onaudioprocess = (e: AudioProcessingEvent) => {
+                const ch = e.inputBuffer.getChannelData(0);
+                pcmSamplesRef.current.push(new Float32Array(ch));
             };
-            recorder.start(100);
-            mediaRecorderRef.current = recorder;
+
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
+
+            audioCtxRef.current = audioCtx;
+            processorRef.current = processor;
+            streamRef.current = stream;
             setIsRecording(true);
         } catch (err) {
             console.error('Microphone access denied:', err);
@@ -189,10 +165,32 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
     };
 
     const stopRecording = () => {
-        if (mediaRecorderRef.current && isRecording) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
+        if (!isRecording) return;
+        setIsRecording(false);
+
+        // Disconnect nodes
+        processorRef.current?.disconnect();
+        audioCtxRef.current?.close();
+        streamRef.current?.getTracks().forEach(t => t.stop());
+
+        const samples = pcmSamplesRef.current;
+        if (!samples.length) {
+            setSttError('No audio captured. Please try again.');
+            return;
         }
+
+        // Flatten all PCM chunks into one array
+        const totalLen = samples.reduce((n, a) => n + a.length, 0);
+        if (totalLen < 1600) { // < 0.1s at 16kHz
+            setSttError('Recording was too short. Please hold and speak clearly.');
+            return;
+        }
+        const flat = new Float32Array(totalLen);
+        let off = 0;
+        for (const arr of samples) { flat.set(arr, off); off += arr.length; }
+
+        const wavBlob = pcmToWav(flat, 16000);
+        transcribeAudio(wavBlob);
     };
 
     const transcribeAudio = async (blob: Blob) => {
