@@ -63,6 +63,12 @@ CARE RECOMMENDATION ENGINE: Once you have enough context, generate a specific ca
 - For Clinic: type of specialist to see, tests likely needed, what to tell the doctor
 - For Emergency: immediate actions to take right now (call 108, specific first aid)
 
+MEDICATION REMINDER ENGINE:
+- If the patient mentions medicines they already take, or if you recommend safe OTC/supportive medicines, create medication_reminders.
+- Do not invent prescription medicines, dosages, or durations that were not stated by the patient or appropriate for common OTC guidance.
+- Each reminder should include simple timing suggestions and a safety note.
+- If there is not enough medication context, return an empty medication_reminders array.
+
 RESPONSE FORMAT — Always respond as strict JSON:
 {
   "response": "Your conversational message to the patient. Be warm, clear, and in simple language. Ask ONE focused follow-up question at a time.",
@@ -70,6 +76,17 @@ RESPONSE FORMAT — Always respond as strict JSON:
   "symptom_summary": "A one-paragraph clinical summary of all symptoms collected so far. Empty string if still in early assessment.",
   "recommended_action": "Single most important action the patient should take right now.",
   "care_recommendations": ["Specific actionable step 1", "Specific actionable step 2", "..."],
+  "medication_reminders": [
+    {
+      "medication_name": "Medicine name",
+      "dosage": "Dose if known, otherwise 'As directed'",
+      "instructions": "How to take it safely",
+      "times": ["09:00", "21:00"],
+      "frequency": "Once daily | Twice daily | Every 6 hours | As needed",
+      "duration_days": 3,
+      "safety_note": "Short warning about allergies, pregnancy, interactions, overdose, or when to ask a doctor"
+    }
+  ],
   "session_complete": false
 }
 
@@ -96,6 +113,7 @@ async def _save_triage_session(patient_id: str, response_json: dict, message: st
                 "symptom_summary": response_json.get("symptom_summary", ""),
                 "recommended_action": response_json.get("recommended_action", ""),
                 "care_recommendations": json.dumps(response_json.get("care_recommendations", [])),
+                "medication_reminders": json.dumps(response_json.get("medication_reminders", [])),
                 "session_complete": response_json.get("session_complete", False),
                 "last_message": message,
             })
@@ -186,6 +204,7 @@ async def triage_chat(req: TriageRequest):
     response_json.setdefault("symptom_summary", "")
     response_json.setdefault("recommended_action", "")
     response_json.setdefault("care_recommendations", [])
+    response_json.setdefault("medication_reminders", [])
     response_json.setdefault("session_complete", False)
 
     # Save triage history messages
@@ -275,6 +294,11 @@ async def get_triage_sessions(patient_id: str):
                     s["care_recommendations"] = json.loads(s["care_recommendations"])
                 except Exception:
                     s["care_recommendations"] = []
+            if isinstance(s.get("medication_reminders"), str):
+                try:
+                    s["medication_reminders"] = json.loads(s["medication_reminders"])
+                except Exception:
+                    s["medication_reminders"] = []
         return {"sessions": sessions}
     except Exception as e:
         print(f"[DB] Triage sessions fetch failed: {e}")
@@ -326,6 +350,11 @@ async def get_doctor_triage_alerts(doctor_id: str):
                                 s["care_recommendations"] = json.loads(s["care_recommendations"])
                             except Exception:
                                 s["care_recommendations"] = []
+                        if isinstance(s.get("medication_reminders"), str):
+                            try:
+                                s["medication_reminders"] = json.loads(s["medication_reminders"])
+                            except Exception:
+                                s["medication_reminders"] = []
                         all_alerts.append(s)
 
         # Sort by severity (Emergency first) then by time

@@ -16,7 +16,26 @@ interface TriageResponse {
     symptom_summary: string;
     recommended_action: string;
     care_recommendations: string[];
+    medication_reminders?: MedicationReminderSuggestion[];
     session_complete: boolean;
+}
+
+interface MedicationReminderSuggestion {
+    medication_name: string;
+    dosage?: string;
+    instructions?: string;
+    times?: string[];
+    frequency?: string;
+    duration_days?: number;
+    safety_note?: string;
+}
+
+interface SavedMedicationReminder extends MedicationReminderSuggestion {
+    id: string;
+    start_date: string;
+    active: boolean;
+    source: 'ai' | 'manual';
+    created_at: string;
 }
 
 const SUPPORTED_LANGUAGES = [
@@ -32,6 +51,58 @@ const SUPPORTED_LANGUAGES = [
 ];
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+const DEFAULT_REMINDER_TIMES = ['09:00'];
+
+const todayDateString = () => new Date().toISOString().split('T')[0];
+
+const normalizeTime = (time: string) => {
+    const match = time.match(/^(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    const hour = Math.min(23, Math.max(0, Number(match[1])));
+    const minute = Math.min(59, Math.max(0, Number(match[2])));
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+};
+
+const normalizeReminderSuggestion = (reminder: MedicationReminderSuggestion): MedicationReminderSuggestion | null => {
+    const name = reminder.medication_name?.trim();
+    if (!name) return null;
+
+    const times = (reminder.times || [])
+        .map(t => normalizeTime(String(t)))
+        .filter((t): t is string => Boolean(t));
+
+    return {
+        medication_name: name,
+        dosage: reminder.dosage?.trim() || 'As directed',
+        instructions: reminder.instructions?.trim() || 'Take as advised by your clinician or medicine label.',
+        times: times.length > 0 ? Array.from(new Set(times)) : DEFAULT_REMINDER_TIMES,
+        frequency: reminder.frequency?.trim() || 'Daily',
+        duration_days: Math.min(30, Math.max(1, Number(reminder.duration_days) || 3)),
+        safety_note: reminder.safety_note?.trim() || 'Check allergies, interactions, and label instructions before taking this medicine.',
+    };
+};
+
+const inferMedicationReminders = (recommendations: string[]): MedicationReminderSuggestion[] => {
+    const medicationNames = ['paracetamol', 'acetaminophen', 'ibuprofen', 'cetirizine', 'ors', 'oral rehydration'];
+    return recommendations
+        .map(rec => {
+            const lower = rec.toLowerCase();
+            const matched = medicationNames.find(name => lower.includes(name));
+            if (!matched) return null;
+            const displayName = matched === 'ors' ? 'ORS' : matched.replace(/\b\w/g, c => c.toUpperCase());
+            return normalizeReminderSuggestion({
+                medication_name: displayName,
+                dosage: 'As directed',
+                instructions: rec,
+                times: matched === 'ors' || matched === 'oral rehydration' ? ['09:00', '13:00', '17:00'] : ['09:00'],
+                frequency: matched === 'ors' || matched === 'oral rehydration' ? 'Several times daily' : 'Daily',
+                duration_days: 3,
+                safety_note: 'Use only if safe for you. Ask a clinician or pharmacist if pregnant, allergic, taking other medicines, or symptoms worsen.',
+            });
+        })
+        .filter((reminder): reminder is MedicationReminderSuggestion => Boolean(reminder));
+};
+
 
 // Writes raw Float32 PCM samples directly to a WAV blob (no decoding needed)
 function pcmToWav(samples: Float32Array, sampleRate: number): Blob {
@@ -83,6 +154,9 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
     const [symptomSummary, setSymptomSummary] = useState('');
     const [sessionComplete, setSessionComplete] = useState(false);
     const [sttError, setSttError] = useState('');
+    const [medicationSuggestions, setMedicationSuggestions] = useState<MedicationReminderSuggestion[]>([]);
+    const [savedMedicationReminders, setSavedMedicationReminders] = useState<SavedMedicationReminder[]>([]);
+    const [notificationStatus, setNotificationStatus] = useState('');
 
     // Voice: always attempt — backend will return 503 if not configured
     const [selectedLanguage, setSelectedLanguage] = useState('en-IN');
@@ -97,10 +171,106 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
     const pcmSamplesRef = useRef<Float32Array[]>([]);
     const endOfMessagesRef = useRef<HTMLDivElement>(null);
     const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+    const firedReminderKeysRef = useRef<Set<string>>(new Set());
+    const reminderStorageKey = `clearpulse-medication-reminders-${patientId}`;
 
     useEffect(() => {
         endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, isTyping]);
+
+    useEffect(() => {
+        try {
+            const stored = localStorage.getItem(reminderStorageKey);
+            if (!stored) return;
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) setSavedMedicationReminders(parsed);
+        } catch (err) {
+            console.warn('Failed to load medication reminders:', err);
+        }
+    }, [reminderStorageKey]);
+
+    const persistMedicationReminders = (next: SavedMedicationReminder[]) => {
+        setSavedMedicationReminders(next);
+        localStorage.setItem(reminderStorageKey, JSON.stringify(next));
+    };
+
+    const requestNotificationPermission = async () => {
+        if (!('Notification' in window)) {
+            setNotificationStatus('Browser alerts are not supported here.');
+            return false;
+        }
+        if (Notification.permission === 'granted') return true;
+        if (Notification.permission === 'denied') {
+            setNotificationStatus('Browser alerts are blocked. Enable them in site settings.');
+            return false;
+        }
+        const permission = await Notification.requestPermission();
+        const allowed = permission === 'granted';
+        setNotificationStatus(allowed ? 'Medication alerts enabled.' : 'Medication alerts were not enabled.');
+        return allowed;
+    };
+
+    const addMedicationReminder = async (suggestion: MedicationReminderSuggestion) => {
+        const normalized = normalizeReminderSuggestion(suggestion);
+        if (!normalized) return;
+        await requestNotificationPermission();
+
+        const nextReminder: SavedMedicationReminder = {
+            ...normalized,
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            start_date: todayDateString(),
+            active: true,
+            source: 'ai',
+            created_at: new Date().toISOString(),
+        };
+        persistMedicationReminders([nextReminder, ...savedMedicationReminders]);
+        setNotificationStatus(`${normalized.medication_name} reminder saved.`);
+    };
+
+    const toggleMedicationReminder = (id: string) => {
+        const next = savedMedicationReminders.map(reminder =>
+            reminder.id === id ? { ...reminder, active: !reminder.active } : reminder
+        );
+        persistMedicationReminders(next);
+    };
+
+    const removeMedicationReminder = (id: string) => {
+        persistMedicationReminders(savedMedicationReminders.filter(reminder => reminder.id !== id));
+    };
+
+    const isReminderInWindow = (reminder: SavedMedicationReminder, now: Date) => {
+        const start = new Date(`${reminder.start_date}T00:00:00`);
+        const duration = Math.max(1, Number(reminder.duration_days) || 1);
+        const end = new Date(start);
+        end.setDate(start.getDate() + duration);
+        return now >= start && now < end;
+    };
+
+    useEffect(() => {
+        const checkMedicationReminders = () => {
+            if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+            const now = new Date();
+            const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            const currentDate = todayDateString();
+
+            savedMedicationReminders.forEach(reminder => {
+                if (!reminder.active || !isReminderInWindow(reminder, now)) return;
+                (reminder.times || DEFAULT_REMINDER_TIMES).forEach(time => {
+                    const key = `${reminder.id}-${currentDate}-${time}`;
+                    if (time !== currentTime || firedReminderKeysRef.current.has(key)) return;
+                    firedReminderKeysRef.current.add(key);
+                    new Notification(`Medication reminder: ${reminder.medication_name}`, {
+                        body: `${reminder.dosage || 'As directed'} - ${reminder.instructions || 'Take as advised.'}`,
+                    });
+                });
+            });
+        };
+
+        checkMedicationReminders();
+        const interval = window.setInterval(checkMedicationReminders, 30000);
+        return () => window.clearInterval(interval);
+    }, [savedMedicationReminders]);
 
     // ─── TTS playback ─────────────────────────────────────────────────────
     const playTTS = useCallback(async (text: string) => {
@@ -255,6 +425,15 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
             setCareRecommendations(data.care_recommendations || []);
             setSymptomSummary(data.symptom_summary || '');
             setSessionComplete(data.session_complete || false);
+            const rawMedicationReminders = Array.isArray(data.medication_reminders) ? data.medication_reminders : [];
+            const normalizedReminders = rawMedicationReminders
+                .map(normalizeReminderSuggestion)
+                .filter((reminder): reminder is MedicationReminderSuggestion => Boolean(reminder));
+            setMedicationSuggestions(
+                normalizedReminders.length > 0
+                    ? normalizedReminders
+                    : inferMedicationReminders(data.care_recommendations || [])
+            );
 
             // Auto-play TTS for assistant response
             if (data.response) await playTTS(data.response);
@@ -462,6 +641,102 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
                                 </li>
                             ))}
                         </ul>
+                    </div>
+                )}
+
+                {/* Medication Reminders */}
+                {(
+                    <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+                        <div className="flex items-center justify-between gap-3 mb-4">
+                            <div className="flex items-center gap-2 min-w-0">
+                                <div className="w-8 h-8 bg-violet-50 rounded-full flex items-center justify-center text-violet-600 shrink-0">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 21h4"/><path d="M12 17v4"/><path d="M8 2h8"/><path d="M9 2v6l-4.5 8A3 3 0 0 0 7.1 20h9.8a3 3 0 0 0 2.6-4L15 8V2"/></svg>
+                                </div>
+                                <div className="min-w-0">
+                                    <h3 className="text-sm font-bold text-gray-900">Medication Reminders</h3>
+                                    <p className="text-[11px] text-gray-500 font-medium truncate">{savedMedicationReminders.length} saved</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={requestNotificationPermission}
+                                className="text-xs font-semibold text-violet-700 bg-violet-50 border border-violet-100 px-3 py-2 rounded-xl hover:bg-violet-100 transition shrink-0"
+                            >
+                                Enable Alerts
+                            </button>
+                        </div>
+
+                        {medicationSuggestions.length > 0 && (
+                            <div className="space-y-2 mb-4">
+                                {medicationSuggestions.map((reminder, i) => {
+                                    const alreadySaved = savedMedicationReminders.some(saved =>
+                                        saved.medication_name.toLowerCase() === reminder.medication_name.toLowerCase()
+                                    );
+                                    return (
+                                        <div key={`${reminder.medication_name}-${i}`} className="rounded-2xl border border-violet-100 bg-violet-50/60 p-3">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-semibold text-gray-900 truncate">{reminder.medication_name}</p>
+                                                    <p className="text-xs text-gray-600 mt-0.5">{reminder.dosage || 'As directed'} - {(reminder.times || DEFAULT_REMINDER_TIMES).join(', ')}</p>
+                                                </div>
+                                                <button
+                                                    onClick={() => addMedicationReminder(reminder)}
+                                                    disabled={alreadySaved}
+                                                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                                                >
+                                                    {alreadySaved ? 'Saved' : 'Save'}
+                                                </button>
+                                            </div>
+                                            {reminder.safety_note && (
+                                                <p className="text-[11px] text-violet-800 mt-2 leading-relaxed">{reminder.safety_note}</p>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {savedMedicationReminders.length > 0 && (
+                            <div className="space-y-2">
+                                {savedMedicationReminders.slice(0, 4).map(reminder => (
+                                    <div key={reminder.id} className="rounded-2xl border border-gray-100 bg-gray-50 p-3">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-semibold text-gray-900 truncate">{reminder.medication_name}</p>
+                                                <p className="text-xs text-gray-500 mt-0.5">
+                                                    {(reminder.times || DEFAULT_REMINDER_TIMES).join(', ')} for {reminder.duration_days || 1} day{(reminder.duration_days || 1) === 1 ? '' : 's'}
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <button
+                                                    onClick={() => toggleMedicationReminder(reminder.id)}
+                                                    className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border transition ${reminder.active ? 'bg-green-50 text-green-700 border-green-100' : 'bg-white text-gray-500 border-gray-200'}`}
+                                                >
+                                                    {reminder.active ? 'On' : 'Off'}
+                                                </button>
+                                                <button
+                                                    onClick={() => removeMedicationReminder(reminder.id)}
+                                                    aria-label={`Remove ${reminder.medication_name} reminder`}
+                                                    className="w-7 h-7 rounded-lg border border-gray-200 bg-white text-gray-400 hover:text-red-600 hover:border-red-200 transition flex items-center justify-center"
+                                                >
+                                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {medicationSuggestions.length === 0 && savedMedicationReminders.length === 0 && (
+                            <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 p-4 text-center">
+                                <p className="text-sm font-semibold text-gray-700">No reminders yet</p>
+                                <p className="text-xs text-gray-500 mt-1">Mention current medicines during triage to generate a schedule.</p>
+                            </div>
+                        )}
+
+                        {notificationStatus && (
+                            <p className="text-[11px] text-gray-500 mt-3 bg-gray-50 rounded-xl px-3 py-2 border border-gray-100">{notificationStatus}</p>
+                        )}
                     </div>
                 )}
 
