@@ -970,10 +970,19 @@ export default function DoctorDashboard() {
                                                         apiUrl = 'http://' + apiUrl;
                                                     }
                                                     const res = await fetch(`${apiUrl}/api/integrations/calendar/auth?wallet=${address}`);
+                                                    if (!res.ok) {
+                                                        if (res.status === 503) {
+                                                            alert('Google Calendar sync is temporarily unavailable because the database provider is down. Please try again later.');
+                                                        } else {
+                                                            alert('Failed to start calendar auth. Please try again.');
+                                                        }
+                                                        return;
+                                                    }
                                                     const { url } = await res.json();
                                                     if (url) window.location.href = url;
                                                 } catch (err) {
                                                     console.error('Failed to start calendar auth:', err);
+                                                    alert('Could not reach the server. Please check your connection.');
                                                 }
                                             }}
                                             className="px-4 py-2 rounded-xl bg-white border border-slate-300 text-gray-700 text-xs font-semibold hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm shrink-0"
