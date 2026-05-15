@@ -36,7 +36,7 @@ export default function HeroSection() {
                 <div className="animate-fade-in-up delay-400 text-xl md:text-2xl text-gray-800 max-w-3xl mx-auto mb-8 font-bold font-mono h-20 flex items-center justify-center">
                     <Typewriter
                         text={[
-                            "AI-powered medical analysis secured by blockchain.",
+                            "AI-powered medical analysis secured by IPFS.",
                             "Your health data, fully decentralized.",
                             "Instant AI diagnostics from your reports."
                         ]}
