@@ -75,12 +75,18 @@ async def _generate_analysis_with_retries(client, prompt: str, file_bytes: bytes
             except ClientError as e:
                 last_error = e
                 status_code = getattr(e, "code", 500)
+                error_msg = str(getattr(e, 'message', str(e))).lower()
+                # Always fall through to Groq — don't re-raise for location/quota/model errors
                 if status_code in (429, 500, 502, 503, 504):
                     await asyncio.sleep(0.5)
-                    continue
-                raise
+                elif 'location' in error_msg or 'not supported' in error_msg or status_code == 400:
+                    logger.warning(f"[Gemini] Skipping model {model}: {error_msg}")
+                else:
+                    logger.warning(f"[Gemini] ClientError {status_code} on {model}: {error_msg}")
+                continue
             except Exception as e:
                 last_error = e
+                logger.warning(f"[Gemini] Unexpected error on {model}: {e}")
                 await asyncio.sleep(0.5)
 
     # Groq Fallback
@@ -180,16 +186,12 @@ Ensure risk_score is a number. Extract biomarkers as key-value pairs where possi
         response = await _generate_analysis_with_retries(client, prompt, file_bytes, req.file_type)
     except ClientError as e:
         status_code = getattr(e, "code", 500)
-        if status_code == 429:
-            logger.warning("Gemini rate limit reached. Using fallback analysis: %s", e)
-        elif status_code in (500, 502, 503, 504):
-            logger.warning("Gemini temporarily unavailable. Using fallback analysis: %s", e)
-        else:
-            raise HTTPException(status_code=status_code, detail=f"Gemini API error: {getattr(e, 'message', str(e))}")
+        error_msg = str(getattr(e, 'message', str(e)))
+        logger.warning("Gemini error (using fallback): [%s] %s", status_code, error_msg)
         response = None
         used_ai_fallback = True
     except Exception as e:
-        logger.warning("Failed to communicate with AI service. Using fallback analysis: %s", e)
+        logger.warning("Failed to communicate with AI service (using fallback): %s", e)
         response = None
         used_ai_fallback = True
 
