@@ -45,7 +45,10 @@ interface Analysis {
     tx_hash?: string;
     record_id?: number;
     created_at: string;
+    biomarkers?: Record<string, string>;
+    improvement_plan?: string[];
     organ_data?: Record<string, any>;
+    is_baseline?: boolean;
 }
 
 interface Appointment {
@@ -61,13 +64,45 @@ interface Appointment {
     doctor_specialty?: string;
 }
 
+const DEFAULT_NORMAL_RECORD: Analysis = {
+    id: 'baseline-normal-health',
+    file_name: 'Baseline Wellness Profile',
+    file_url: 'baseline',
+    summary: 'Default baseline view showing a generally normal human health profile. Upload a medical report to replace this with AI-generated findings from your actual record.',
+    risk_score: 12,
+    conditions: [],
+    specialist: 'General Practitioner',
+    urgency: 'low',
+    record_hash: 'baseline-normal-state',
+    tx_hash: 'BASELINE',
+    created_at: '2026-05-15T00:00:00.000Z',
+    biomarkers: {
+        'Heart Rate': '72 bpm',
+        'Blood Pressure Systolic': '118 mmHg',
+        'Blood Pressure Diastolic': '76 mmHg',
+        'SpO2': '98%',
+        'Fasting Glucose': '92 mg/dL',
+        'HbA1c': '5.2%',
+        'LDL': '96 mg/dL',
+        'HDL': '58 mg/dL',
+        'Creatinine': '0.9 mg/dL',
+        'eGFR': '95 mL/min',
+    },
+    improvement_plan: [
+        'Maintain regular physical activity, balanced meals, hydration, and consistent sleep.',
+        'Continue routine preventive checkups and upload any new reports for personalized AI analysis.',
+        'Seek medical advice promptly if new symptoms, abnormal vitals, or concerning changes appear.',
+    ],
+    is_baseline: true,
+};
+
 export default function PatientDashboard() {
     const router = useRouter();
     const { isLoaded, isSignedIn, user } = useUser();
     const address = user?.id;
     const isConnected = isSignedIn;
     const [records, setRecords] = useState<Analysis[]>([]);
-    const [selectedRecord, setSelectedRecord] = useState<Analysis | null>(null);
+    const [selectedRecord, setSelectedRecord] = useState<Analysis | null>(DEFAULT_NORMAL_RECORD);
     const [isUploading, setIsUploading] = useState(false);
     const [isRegistering, setIsRegistering] = useState(false);
     const [isRegistered, setIsRegistered] = useState(true);
@@ -92,8 +127,13 @@ export default function PatientDashboard() {
         try {
             const response = await getPatientRecords(address);
             if (response.records) {
-                setRecords(response.records as Analysis[]);
-                if (response.records.length > 0 && !selectedRecord) setSelectedRecord(response.records[0] as Analysis);
+                const loadedRecords = response.records as Analysis[];
+                setRecords(loadedRecords);
+                if (loadedRecords.length > 0 && (!selectedRecord || selectedRecord.is_baseline)) {
+                    setSelectedRecord(loadedRecords[0]);
+                } else if (loadedRecords.length === 0 && !selectedRecord) {
+                    setSelectedRecord(DEFAULT_NORMAL_RECORD);
+                }
             }
             
             // Handle service unavailable status
@@ -397,6 +437,9 @@ export default function PatientDashboard() {
 
     if (!isLoaded || !isSignedIn) return null;
 
+    const visibleRecords = records.length > 0 ? records : [DEFAULT_NORMAL_RECORD];
+    const recordsForDashboard = records.length > 0 ? records : [DEFAULT_NORMAL_RECORD];
+
     return (
         <div className="min-h-screen pt-24 pb-12 px-6 font-sans relative bg-[#FAFAFA]">
             {/* Subtle background decoration */}
@@ -489,19 +532,11 @@ export default function PatientDashboard() {
                         <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-24rem)] min-h-[500px]">
                             <div className="bg-gray-50/50 border-b border-gray-100 px-6 py-4 flex items-center justify-between shrink-0">
                                 <h3 className="font-semibold text-gray-900 text-sm tracking-wide">Medical Records</h3>
-                                <div className="text-xs font-medium text-gray-500 bg-white border border-gray-200 px-2 py-0.5 rounded-full">{records.length} docs</div>
+                                <div className="text-xs font-medium text-gray-500 bg-white border border-gray-200 px-2 py-0.5 rounded-full">{records.length > 0 ? `${records.length} docs` : 'baseline'}</div>
                             </div>
 
                             <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2">
-                                {records.length === 0 ? (
-                                    <div className="h-full flex flex-col items-center justify-center text-center p-6 opacity-60">
-                                        <div className="w-12 h-12 rounded-full bg-gray-50 border border-gray-200 flex items-center justify-center mb-3">
-                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
-                                        </div>
-                                        <p className="text-sm font-medium text-gray-500">No records found</p>
-                                    </div>
-                                ) : (
-                                    records.map(r => {
+                                {visibleRecords.map(r => {
                                         const isSelected = selectedRecord?.id === r.id;
                                         return (
                                             <div
@@ -546,7 +581,8 @@ export default function PatientDashboard() {
 
                                                     <button
                                                         onClick={(e) => deleteRecord(r.id, e)}
-                                                        className={`shrink-0 w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                                                        disabled={r.is_baseline}
+                                                        className={`shrink-0 w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all disabled:hidden ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                                                         title="Delete Record"
                                                     >
                                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
@@ -554,8 +590,7 @@ export default function PatientDashboard() {
                                                 </div>
                                             </div>
                                         );
-                                    })
-                                )}
+                                    })}
                             </div>
                         </div>
                     </div>
@@ -633,11 +668,18 @@ export default function PatientDashboard() {
                                         {/* Access control panel */}
                                         {activeTab === 'access' && (
                                             <div className="animate-fade-in max-w-3xl">
-                                                <AccessManager
-                                                    analysisId={selectedRecord.id}
-                                                    recordId={selectedRecord.record_id}
-                                                    patientWallet={address ? address : undefined}
-                                                />
+                                                {selectedRecord.is_baseline ? (
+                                                    <div className="bg-blue-50 border border-blue-100 rounded-2xl p-5 text-blue-800">
+                                                        <h3 className="font-semibold mb-1">Baseline profile active</h3>
+                                                        <p className="text-sm">Upload a report to create a real encrypted record, then data sharing controls will appear here.</p>
+                                                    </div>
+                                                ) : (
+                                                    <AccessManager
+                                                        analysisId={selectedRecord.id}
+                                                        recordId={selectedRecord.record_id}
+                                                        patientWallet={address ? address : undefined}
+                                                    />
+                                                )}
                                             </div>
                                         )}
 
@@ -651,7 +693,7 @@ export default function PatientDashboard() {
                                         {/* Health Analytics panel */}
                                         {activeTab === 'health' && address && (
                                             <div className="animate-fade-in">
-                                                <HealthView records={records} address={address} refreshTrigger={refreshTrigger} />
+                                                <HealthView records={recordsForDashboard} address={address} refreshTrigger={refreshTrigger} />
                                             </div>
                                         )}
 

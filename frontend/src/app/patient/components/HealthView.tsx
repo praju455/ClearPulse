@@ -117,12 +117,12 @@ export default function HealthView({ records, address, refreshTrigger }: HealthV
 
             <div className="border-2 border-black p-4 bg-white">
                 <h3 className="font-bold uppercase mb-4 text-center bg-black text-white py-1">Risk Trends</h3>
-                <RiskProgressChart patientWallet={address} refreshTrigger={refreshTrigger} />
+                <RiskProgressChart patientWallet={address} refreshTrigger={refreshTrigger} fallbackRecords={records} />
             </div>
 
             <div>
                 <h3 className="font-bold uppercase tracking-wider mb-4 border-l-4 border-retro-accent-pink pl-3">Health Timeline</h3>
-                <HealthTimeline patientWallet={address} refreshTrigger={refreshTrigger} />
+                <HealthTimeline patientWallet={address} refreshTrigger={refreshTrigger} fallbackRecords={records} />
             </div>
         </div>
     );

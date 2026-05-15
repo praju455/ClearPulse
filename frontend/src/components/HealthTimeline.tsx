@@ -18,9 +18,10 @@ interface TimelineEntry {
 interface HealthTimelineProps {
     patientWallet: string;
     refreshTrigger?: number;
+    fallbackRecords?: TimelineEntry[];
 }
 
-export default function HealthTimeline({ patientWallet, refreshTrigger = 0 }: HealthTimelineProps) {
+export default function HealthTimeline({ patientWallet, refreshTrigger = 0, fallbackRecords = [] }: HealthTimelineProps) {
     const [entries, setEntries] = useState<TimelineEntry[]>([]);
     const [isLoading, setIsLoading] = useState(true);
 
@@ -32,14 +33,16 @@ export default function HealthTimeline({ patientWallet, refreshTrigger = 0 }: He
         setIsLoading(true);
         try {
             const { records: data } = await getPatientRecords(patientWallet);
-            if (data) {
-                const sorted = [...data].sort((a: any, b: any) =>
+            const sourceEntries = data?.length ? data : fallbackRecords;
+            if (sourceEntries.length) {
+                const sorted = [...sourceEntries].sort((a: any, b: any) =>
                     new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
                 );
                 setEntries(sorted as TimelineEntry[]);
             }
         } catch (err) {
             console.error('Failed to load timeline:', err);
+            setEntries(fallbackRecords);
         } finally {
             setIsLoading(false);
         }

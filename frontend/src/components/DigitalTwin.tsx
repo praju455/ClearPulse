@@ -107,41 +107,41 @@ export default function DigitalTwin({ analysisData, recordId }: DigitalTwinProps
             normalRange: 'Cortisol: 6-23 µg/dL'
         },
         'Lungs': {
-            status: 'warning', muscleId: 'LUNGS', score: 52,
-            details: 'Elevated inflammatory markers in respiratory pathway',
-            aiInsights: ['SpO2 trending downward (96% → 94%)', 'Mild bronchial inflammation detected', 'FEV1/FVC ratio slightly reduced'],
-            recommendations: ['Pulmonary function test recommended', 'Avoid polluted environments', 'Consider inhaler prescription review'],
+            status: 'safe', muscleId: 'LUNGS', score: 11,
+            details: 'Normal respiratory function',
+            aiInsights: ['Oxygen saturation is within expected range', 'No respiratory warning markers detected', 'Breathing capacity appears stable'],
+            recommendations: ['Maintain regular aerobic activity', 'Avoid smoking and high-pollution exposure', 'Follow routine preventive care'],
             markers: [
-                { name: 'SpO2', value: '94%', status: 'warning' },
-                { name: 'CRP', value: '4.2 mg/L', status: 'warning' },
-                { name: 'FEV1', value: '78%', status: 'warning' },
+                { name: 'SpO2', value: '98%', status: 'safe' },
+                { name: 'CRP', value: '1.2 mg/L', status: 'safe' },
+                { name: 'FEV1', value: '92%', status: 'safe' },
                 { name: 'IgE', value: '180 IU/mL', status: 'safe' },
             ],
             normalRange: 'SpO2: 95-100%'
         },
         'Heart': {
-            status: 'risk', muscleId: 'HEART', score: 82,
-            details: 'Critical: Elevated cardiac troponin and irregular rhythm',
-            aiInsights: ['Troponin I elevated — possible myocardial stress', 'QTc interval prolonged (480ms)', 'LDL cholesterol significantly above target', 'Blood pressure consistently elevated'],
-            recommendations: ['URGENT: Cardiology consultation within 48 hours', 'ECG monitoring recommended', 'Start statin therapy if not contraindicated', 'Reduce sodium intake immediately'],
+            status: 'safe', muscleId: 'HEART', score: 13,
+            details: 'Normal cardiovascular baseline',
+            aiInsights: ['Resting pulse appears within normal range', 'Blood pressure baseline is healthy', 'Lipid markers are within target range'],
+            recommendations: ['Continue heart-healthy diet and activity', 'Keep routine blood pressure checks', 'Upload cardiac reports for personalized scoring'],
             markers: [
-                { name: 'Troponin I', value: '0.08 ng/mL', status: 'risk' },
-                { name: 'BNP', value: '450 pg/mL', status: 'risk' },
-                { name: 'LDL', value: '185 mg/dL', status: 'risk' },
-                { name: 'BP', value: '155/95', status: 'risk' },
-                { name: 'Heart Rate', value: '92 bpm', status: 'warning' },
+                { name: 'Troponin I', value: '<0.01 ng/mL', status: 'safe' },
+                { name: 'BNP', value: '42 pg/mL', status: 'safe' },
+                { name: 'LDL', value: '96 mg/dL', status: 'safe' },
+                { name: 'BP', value: '118/76', status: 'safe' },
+                { name: 'Heart Rate', value: '72 bpm', status: 'safe' },
             ],
             normalRange: 'Troponin I: <0.04 ng/mL'
         },
         'Liver': {
-            status: 'warning', muscleId: 'LIVER', score: 44,
-            details: 'Mild hepatic enzyme elevation',
-            aiInsights: ['ALT slightly above reference range', 'Possible fatty liver grade I', 'Albumin production adequate'],
-            recommendations: ['Reduce alcohol consumption', 'Liver ultrasound in 3 months', 'Mediterranean diet recommended'],
+            status: 'safe', muscleId: 'LIVER', score: 10,
+            details: 'Normal hepatic baseline',
+            aiInsights: ['Liver enzyme baseline appears normal', 'Albumin production appears adequate', 'No hepatic warning markers detected'],
+            recommendations: ['Maintain balanced nutrition', 'Limit alcohol intake', 'Review liver panels during routine checkups'],
             markers: [
-                { name: 'ALT', value: '52 U/L', status: 'warning' },
-                { name: 'AST', value: '38 U/L', status: 'safe' },
-                { name: 'GGT', value: '65 U/L', status: 'warning' },
+                { name: 'ALT', value: '24 U/L', status: 'safe' },
+                { name: 'AST', value: '22 U/L', status: 'safe' },
+                { name: 'GGT', value: '28 U/L', status: 'safe' },
                 { name: 'Albumin', value: '4.1 g/dL', status: 'safe' },
             ],
             normalRange: 'ALT: 7-35 U/L'
@@ -175,6 +175,10 @@ export default function DigitalTwin({ analysisData, recordId }: DigitalTwinProps
     // ─── PARSE ANALYSIS DATA → RISK SCORES ─────────────────────
     useEffect(() => {
         if (!analysisData) return;
+        if (analysisData.is_baseline) {
+            setRiskHighlighted(false);
+            return;
+        }
         const text = JSON.stringify(analysisData).toLowerCase();
 
         const evaluateRisk = (keywords: string[], organName: string): Omit<OrganStatus, 'muscleId'> => {

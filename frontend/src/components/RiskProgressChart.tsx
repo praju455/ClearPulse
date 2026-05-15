@@ -12,9 +12,10 @@ interface DataPoint {
 interface RiskProgressChartProps {
     patientWallet: string;
     refreshTrigger?: number;
+    fallbackRecords?: any[];
 }
 
-export default function RiskProgressChart({ patientWallet, refreshTrigger = 0 }: RiskProgressChartProps) {
+export default function RiskProgressChart({ patientWallet, refreshTrigger = 0, fallbackRecords = [] }: RiskProgressChartProps) {
     const [data, setData] = useState<DataPoint[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -27,8 +28,9 @@ export default function RiskProgressChart({ patientWallet, refreshTrigger = 0 }:
         setIsLoading(true);
         try {
             const { records: analyses } = await getPatientRecords(patientWallet);
-            if (analyses) {
-                const sorted = [...analyses].sort((a: any, b: any) =>
+            const sourceRecords = analyses?.length ? analyses : fallbackRecords;
+            if (sourceRecords.length) {
+                const sorted = [...sourceRecords].sort((a: any, b: any) =>
                     new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
                 );
                 setData(sorted.map((a: any) => ({
@@ -39,6 +41,11 @@ export default function RiskProgressChart({ patientWallet, refreshTrigger = 0 }:
             }
         } catch (err) {
             console.error('Failed to load chart data:', err);
+            setData(fallbackRecords.map((a: any) => ({
+                date: a.created_at,
+                score: a.risk_score,
+                fileName: a.file_name,
+            })));
         } finally {
             setIsLoading(false);
         }
