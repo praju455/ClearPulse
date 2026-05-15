@@ -33,6 +33,51 @@ const SUPPORTED_LANGUAGES = [
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
+// ─── WAV encoder ─────────────────────────────────────────────────────────────
+// Converts any browser-recorded blob (webm/mp4/ogg) into standard WAV PCM 16-bit
+// which Sarvam STT accepts reliably on every browser.
+async function convertBlobToWav(blob: Blob): Promise<Blob> {
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    await audioCtx.close();
+
+    const numChannels = 1; // mono
+    const sampleRate = audioBuffer.sampleRate;
+    const samples = audioBuffer.getChannelData(0); // use first channel
+    const length = samples.length;
+
+    const wavBuffer = new ArrayBuffer(44 + length * 2);
+    const view = new DataView(wavBuffer);
+
+    const write = (offset: number, str: string) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+
+    write(0, 'RIFF');
+    view.setUint32(4, 36 + length * 2, true);
+    write(8, 'WAVE');
+    write(12, 'fmt ');
+    view.setUint32(16, 16, true);       // chunk size
+    view.setUint16(20, 1, true);        // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true);        // block align
+    view.setUint16(34, 16, true);       // bits per sample
+    write(36, 'data');
+    view.setUint32(40, length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        offset += 2;
+    }
+
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 interface TriagePanelProps {
@@ -107,35 +152,34 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-            // Prefer webm/opus — it's reliably parsed by Sarvam.
-            // Only fall back to mp4 for Safari which doesn't support webm at all.
+            // Pick any supported format — we'll convert to WAV before sending
             let mimeType = '';
             if (typeof MediaRecorder.isTypeSupported === 'function') {
-                if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-                    mimeType = 'audio/webm;codecs=opus';
-                } else if (MediaRecorder.isTypeSupported('audio/webm')) {
-                    mimeType = 'audio/webm';
-                } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                    mimeType = 'audio/mp4'; // Safari fallback only
-                }
+                if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
+                else if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
+                else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
             }
 
-            const options = mimeType ? { mimeType } : undefined;
-            const recorder = new MediaRecorder(stream, options);
-
+            const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
             audioChunksRef.current = [];
             recorder.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
             recorder.onstop = async () => {
                 stream.getTracks().forEach(t => t.stop());
-                const actualMimeType = recorder.mimeType || mimeType || 'audio/webm';
-                const blob = new Blob(audioChunksRef.current, { type: actualMimeType });
-                if (blob.size < 500) {
+                const rawBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+                if (rawBlob.size < 500) {
                     setSttError('Recording was too short. Please hold and speak clearly.');
                     return;
                 }
-                await transcribeAudio(blob, actualMimeType);
+                try {
+                    // Convert to WAV — Sarvam accepts this format on every browser
+                    const wavBlob = await convertBlobToWav(rawBlob);
+                    await transcribeAudio(wavBlob);
+                } catch (convErr) {
+                    console.error('WAV conversion failed, sending raw:', convErr);
+                    await transcribeAudio(rawBlob); // fallback: send raw
+                }
             };
-            recorder.start(100); // collect chunks every 100ms for reliability
+            recorder.start(100);
             mediaRecorderRef.current = recorder;
             setIsRecording(true);
         } catch (err) {
@@ -151,12 +195,12 @@ export default function TriagePanel({ patientId }: TriagePanelProps) {
         }
     };
 
-    const transcribeAudio = async (blob: Blob, mimeType: string = 'audio/webm') => {
+    const transcribeAudio = async (blob: Blob) => {
         try {
             setIsTyping(true);
             const formData = new FormData();
-            const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
-            formData.append('audio', blob, `recording.${extension}`);
+            // Always send as WAV — Sarvam STT accepts it on every browser/OS
+            formData.append('audio', blob, 'recording.wav');
             formData.append('language_code', selectedLanguage);
             const res = await fetch(`${API_URL}/api/triage/stt`, {
                 method: 'POST',
