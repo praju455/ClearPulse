@@ -612,4 +612,47 @@ ClearPulse/
 
 ---
 
+## 🤖 Triage Chatbot Features
+
+The **Triage** chatbot is a specialized AI assistant that helps patients quickly assess the urgency of their medical concerns. Key capabilities include:
+
+- **Symptom Classification**: Uses the Sarvam language model to categorize symptoms into medical specialties and priority levels.
+- **Risk Scoring**: Generates a real‑time risk score (0–100) based on extracted biomarkers and reported symptoms.
+- **Dynamic Question Flow**: Asks follow‑up questions to refine the triage outcome, leveraging contextual memory across the conversation.
+- **Instant Referral Suggestions**: Recommends the most appropriate specialist (e.g., cardiology, endocrinology) and can pre‑populate the appointment booking wizard.
+- **Emergency Flagging**: Detects critical keywords (e.g., “chest pain”, “shortness of breath”) and displays an urgent alert banner with a direct call button to emergency services.
+- **Multilingual Support**: Powered by Sarvam’s multilingual engine, enabling conversation in Hindi, Tamil, Telugu, and English.
+- **Secure Session**: All chat data is encrypted client‑side and never stored on the server unless the patient explicitly saves the transcript.
+
+The chatbot is integrated within the **AI Chat** tab and shares the same UI conventions (markdown‑styled responses, confidence scores, disclaimer). It also interacts with the backend triage endpoint (`/triage`) to persist the risk assessment.
+
+## 🎤 Speech‑to‑Text (STT) & Text‑to‑Speech (TTS) via Sarvam API
+
+ClearPulse leverages the **Sarvam API** to provide voice interaction capabilities:
+
+### Speech‑to‑Text (STT)
+
+- **Endpoint**: `POST /api/sarvam/stt`
+- **Supported Formats**: WAV (PCM 16‑bit), MP3, OGG.
+- **Languages**: English, Hindi, Tamil, Telugu, Bengali.
+- **Usage**: Client records audio (e.g., symptom description) in the browser and sends the binary to the STT endpoint. The service returns a JSON payload with the transcribed text and confidence score.
+- **Error Handling**: Returns `422` for unsupported formats; `429` on rate‑limit; `500` on service errors.
+
+### Text‑to‑Speech (TTS)
+
+- **Endpoint**: `POST /api/sarvam/tts`
+- **Parameters**:
+  - `text` (string, max 500 characters)
+  - `language` (enum, default `en`)
+  - `voice` (optional, selects regional voice models)
+- **Response**: Audio file in MP3 format streamed back to the client.
+- **Features**:
+  - Natural‑sounding regional voices for Hindi, Tamil, Telugu.
+  - Adjustable speech rate and pitch.
+  - Supports SSML tags for emphasis and pauses.
+
+These APIs enable hands‑free interaction throughout the platform: users can dictate symptoms for the triage chatbot, and the system can read out AI analysis summaries or appointment confirmations.
+
+---
+
 > **Built with ClearPulse** — *Decentralized. Intelligent. Patient-first.*
