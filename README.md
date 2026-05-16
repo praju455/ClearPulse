@@ -599,60 +599,103 @@ ClearPulse/
 - **Sarvam**: Multilingual support for regional language interactions
 - **Vault**: Secure key management for encrypted record access
 
----
-
-## 🔒 Privacy & Security
-
-- **Zero-Knowledge Encryption Pipeline**: Encryption keys are manually entered and locally managed by the patient. Keys are never stored in the database or sent to the backend, ensuring absolute data privacy.
-- **Local PDF Processing**: Text extraction from uploaded PDF files is handled securely in the browser using `pdfjs-dist`, preventing sensitive raw files from unnecessary transit.
-- **IPFS Storage**: Medical reports are pinned to IPFS — content-addressed and decentralized. Only patients with the correct CID and decryption key can access their data.
-- **Access Control**: No doctor can read records without the patient's explicit grant. Access is scoped per-record and can be revoked at any time.
-- **Cryptographic Verification**: SHA-256 hashes stored on IPFS ensure report integrity — tamper-proof verification without a central authority.
-- **Secure AI Pipeline**: AI analysis runs server-side via FastAPI — raw report data is never exposed to third-party databases.
 
 ---
 
-## 🤖 Triage Chatbot Features
+## Privacy & Security
 
-The **Triage** chatbot is a specialized AI assistant that helps patients quickly assess the urgency of their medical concerns. Key capabilities include:
-
-- **Symptom Classification**: Uses the Sarvam language model to categorize symptoms into medical specialties and priority levels.
-- **Risk Scoring**: Generates a real‑time risk score (0–100) based on extracted biomarkers and reported symptoms.
-- **Dynamic Question Flow**: Asks follow‑up questions to refine the triage outcome, leveraging contextual memory across the conversation.
-- **Instant Referral Suggestions**: Recommends the most appropriate specialist (e.g., cardiology, endocrinology) and can pre‑populate the appointment booking wizard.
-- **Emergency Flagging**: Detects critical keywords (e.g., “chest pain”, “shortness of breath”) and displays an urgent alert banner with a direct call button to emergency services.
-- **Multilingual Support**: Powered by Sarvam’s multilingual engine, enabling conversation in Hindi, Tamil, Telugu, and English.
-- **Secure Session**: All chat data is encrypted client‑side and never stored on the server unless the patient explicitly saves the transcript.
-
-The chatbot is integrated within the **AI Chat** tab and shares the same UI conventions (markdown‑styled responses, confidence scores, disclaimer). It also interacts with the backend triage endpoint (`/triage`) to persist the risk assessment.
-
-## 🎤 Speech‑to‑Text (STT) & Text‑to‑Speech (TTS) via Sarvam API
-
-ClearPulse leverages the **Sarvam API** to provide voice interaction capabilities:
-
-### Speech‑to‑Text (STT)
-
-- **Endpoint**: `POST /api/sarvam/stt`
-- **Supported Formats**: WAV (PCM 16‑bit), MP3, OGG.
-- **Languages**: English, Hindi, Tamil, Telugu, Bengali.
-- **Usage**: Client records audio (e.g., symptom description) in the browser and sends the binary to the STT endpoint. The service returns a JSON payload with the transcribed text and confidence score.
-- **Error Handling**: Returns `422` for unsupported formats; `429` on rate‑limit; `500` on service errors.
-
-### Text‑to‑Speech (TTS)
-
-- **Endpoint**: `POST /api/sarvam/tts`
-- **Parameters**:
-  - `text` (string, max 500 characters)
-  - `language` (enum, default `en`)
-  - `voice` (optional, selects regional voice models)
-- **Response**: Audio file in MP3 format streamed back to the client.
-- **Features**:
-  - Natural‑sounding regional voices for Hindi, Tamil, Telugu.
-  - Adjustable speech rate and pitch.
-  - Supports SSML tags for emphasis and pauses.
-
-These APIs enable hands‑free interaction throughout the platform: users can dictate symptoms for the triage chatbot, and the system can read out AI analysis summaries or appointment confirmations.
+- **Zero-Knowledge Encryption**: Keys locally managed, never stored server-side.
+- **Local PDF Processing**: In-browser text extraction via pdfjs-dist.
+- **IPFS Storage**: Reports content-addressed and decentralized.
+- **Access Control**: No doctor can access records without explicit patient grant.
+- **Cryptographic Verification**: SHA-256 hashes ensure tamper-proof integrity.
 
 ---
 
-> **Built with ClearPulse** — *Decentralized. Intelligent. Patient-first.*
+## Triage Chatbot - AI Emergency Triage & Care Recommendation Assistant
+
+The Triage Chatbot conducts a structured medical intake and generates a personalized care plan.
+
+### Structured Intake Protocol
+
+| Step | Information Collected |
+|------|-----------------------|
+| 1 | Chief Complaint |
+| 2 | Onset - sudden or gradual |
+| 3 | Severity - rated 1-10 |
+| 4 | Location & Radiation |
+| 5 | Associated Symptoms |
+| 6 | Medical History |
+| 7 | Current Medications |
+| 8 | Risk Factors |
+
+### Triage Levels
+
+| Level | Description |
+|-------|-------------|
+| Home | Mild - OTC meds, rest, hydration |
+| Clinic | Professional evaluation within 1-3 days |
+| Emergency | Life-threatening - chest pain, stroke, anaphylaxis |
+| Assessing | Still collecting information |
+
+### Medicine Suggestions & Care Recommendation Engine
+
+The AI generates tailored care_recommendations based on triage level:
+
+**Home Care - OTC Medicine Suggestions:**
+- Specific OTC medicines (paracetamol for fever, antacids for acidity, ORS for dehydration, antihistamines for allergies)
+- Home remedies (warm compress, steam inhalation, ginger tea, saltwater gargle)
+- Red-flag symptoms to watch for
+- Rest, hydration, and dietary advice
+
+**Clinic Care:**
+- Exact specialist to visit (cardiologist, endocrinologist, neurologist)
+- Diagnostic tests likely needed (CBC, ECG, fasting blood sugar, urine culture)
+- Structured symptom summary to share with the doctor
+
+**Emergency Care:**
+- Immediate instructions: Call 108, do not eat/drink, keep patient lying flat
+- Step-by-step first-aid while waiting for services
+- All non-urgent suggestions suppressed
+
+### AI Engine
+
+| Feature | Detail |
+|---------|--------|
+| Primary | Gemini 2.5 Flash, JSON output, temp 0.2 |
+| Fallback | Groq LLaMA 3.3 70B - auto-failover |
+| Memory | Full history every turn |
+| Persistence | Sessions saved to DB, visible to doctors |
+
+### Triage API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /api/triage/chat | Message -> structured triage + care plan |
+| POST | /api/triage/stt | Voice -> transcript (Sarvam STT) |
+| POST | /api/triage/tts | Text -> speech audio (Sarvam TTS) |
+| GET | /api/triage/sessions/{patient_id} | Past triage sessions |
+| GET | /api/triage/doctor-alerts/{doctor_id} | Clinic/Emergency alerts |
+| GET | /api/triage/languages | Supported languages |
+
+---
+
+## Speech-to-Text (STT) & Text-to-Speech (TTS) via Sarvam API
+
+### STT - POST /api/triage/stt
+- Formats: WAV (PCM 16-bit), MP3, OGG
+- Languages: en-IN, hi-IN, ta-IN, te-IN, bn-IN
+- Returns: transcribed text + language code
+- Errors: 503 if SARVAM_API_KEY missing, 500 on failure
+
+### TTS - POST /api/triage/tts
+- Request: JSON with text and language_code (e.g. hi-IN)
+- Response: audio/wav stream
+- Features: regional voices, medicine instructions spoken aloud, hands-free for non-readers
+- Errors: 503 if SARVAM_API_KEY missing, 500 on failure
+
+Voice-driven triage: patients speak symptoms, AI responds with spoken medicine suggestions in their preferred language.
+
+---
+
+> **Built with ClearPulse** - Decentralized. Intelligent. Patient-first.
