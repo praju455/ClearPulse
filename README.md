@@ -612,6 +612,8 @@ ClearPulse/
 
 ## Triage Chatbot - AI Emergency Triage & Care Recommendation Assistant
 
+![Triage Chatbot](./screenshots/triage.png)
+
 The Triage Chatbot conducts a structured medical intake and generates a personalized care plan.
 
 ### Structured Intake Protocol
