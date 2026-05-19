@@ -146,8 +146,6 @@ A chronological, card-based list of all past reports — most recent first. Each
 
 ### 🤖 AI Chat Tab
 
-![AI Chat — ClearPulse Chatbot](./screenshots/chatbor.png)
-
 The **AI Chat** tab provides an intelligent, context-aware health assistant directly inside the dashboard. Responses are grounded in the patient's uploaded medical records.
 
 | Element | Description |
