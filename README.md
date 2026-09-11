@@ -165,7 +165,7 @@ The **Video Consult** tab connects patients to a real-time AI doctor avatar powe
 
 #### Step 1 — Pre-Join Device Check
 
-![AI Avatar — Pre-Join Screen](./screenshots/aiavatar1.png)
+
 
 Before the session begins, patients go through a device setup screen:
 
