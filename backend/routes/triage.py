@@ -140,6 +140,11 @@ async def triage_chat(req: TriageRequest):
             types.Content(role=role, parts=[types.Part(text=h.content)])
         )
 
+    # Gemini requires history to start with a "user" turn — strip any leading "model" messages
+    # (the frontend always includes the hardcoded assistant greeting in history)
+    while new_sdk_history and new_sdk_history[0].role != "user":
+        new_sdk_history.pop(0)
+
     chat_session = client.chats.create(
         model="gemini-2.5-flash",
         history=new_sdk_history,
