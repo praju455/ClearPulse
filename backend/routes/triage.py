@@ -1,6 +1,8 @@
 import json
 import re
 import io
+import os
+import asyncio
 from typing import List, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -8,7 +10,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from google.genai import types
-from google.genai.errors import ClientError
 from services.gemini import get_gemini_client
 from services.groq_client import get_groq_client
 from services.insforge import db_select, db_insert
@@ -33,6 +34,92 @@ class TriageRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     language_code: str = "en-IN"
+
+
+def _configured_models(env_name: str, defaults: List[str]) -> List[str]:
+    """Return a de-duplicated model preference list from configuration."""
+    configured = os.getenv(env_name, "")
+    candidates = configured.split(",") if configured else defaults
+    return list(dict.fromkeys(model.strip() for model in candidates if model.strip()))
+
+
+def _gemini_history(history: List[TriageMessage]) -> List[types.Content]:
+    """Build valid Gemini history, omitting the UI-only greeting."""
+    normalized: List[types.Content] = []
+    for message in history:
+        content = message.content.strip()
+        if not content:
+            continue
+        role = "user" if message.role == "user" else "model"
+        if normalized and normalized[-1].role == role:
+            previous = normalized[-1].parts[0].text or ""
+            normalized[-1] = types.Content(
+                role=role,
+                parts=[types.Part(text=f"{previous}\n{content}".strip())],
+            )
+        else:
+            normalized.append(types.Content(role=role, parts=[types.Part(text=content)]))
+
+    while normalized and normalized[0].role != "user":
+        normalized.pop(0)
+    return normalized
+
+
+def _local_triage_response(req: TriageRequest) -> dict:
+    """Return a conservative, non-diagnostic response if AI providers fail."""
+    user_history = [h.content for h in req.history if h.role == "user"]
+    combined = " ".join([*user_history, req.message]).lower()
+    emergency_markers = (
+        "chest pain", "can't breathe", "cannot breathe", "difficulty breathing",
+        "severe bleeding", "unconscious", "passed out", "face drooping",
+        "slurred speech", "seizure", "anaphylaxis", "suicidal",
+    )
+    if any(marker in combined for marker in emergency_markers):
+        return {
+            "response": (
+                "Your symptoms may need emergency care. Call local emergency services now "
+                "(112 or 108 in India), and do not drive yourself. If someone is nearby, ask them to stay with you."
+            ),
+            "triage_level": "Emergency",
+            "symptom_summary": req.message.strip(),
+            "recommended_action": "Call emergency services now.",
+            "care_recommendations": [
+                "Call 112 or 108 in India, or your local emergency number.",
+                "Do not drive yourself; ask someone to stay with you.",
+                "Follow the emergency operator's instructions.",
+            ],
+            "medication_reminders": [],
+            "session_complete": True,
+            "ai_status": "safe_fallback",
+        }
+
+    if "fever" in combined or "temperature" in combined:
+        response = (
+            "I can help assess the urgency. What is your measured temperature, how long has the fever lasted, "
+            "and do you have trouble breathing, confusion, a stiff neck, a seizure, or a new rash?"
+        )
+        recommendations = [
+            "Rest and drink fluids if you can keep them down.",
+            "Measure and note your temperature.",
+            "Seek urgent help now for breathing difficulty, confusion, seizure, severe dehydration, or a stiff neck.",
+        ]
+    elif not any(token in combined for token in ("started", "since", "hour", "day", "week")):
+        response = "When did this start, and was the onset sudden or gradual?"
+        recommendations = ["Note when the symptom began and whether it is worsening."]
+    else:
+        response = "On a scale of 1 to 10, how severe is it, and are you having any other symptoms?"
+        recommendations = ["Monitor for rapid worsening or any new emergency warning signs."]
+
+    return {
+        "response": response,
+        "triage_level": "Assessing",
+        "symptom_summary": " ".join([*user_history, req.message]).strip(),
+        "recommended_action": "Answer the follow-up question so urgency can be assessed.",
+        "care_recommendations": recommendations,
+        "medication_reminders": [],
+        "session_complete": False,
+        "ai_status": "safe_fallback",
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System Prompt (Enhanced NLP — Structured Symptom Collection + Care Engine)
@@ -130,78 +217,85 @@ async def triage_chat(req: TriageRequest):
     if not req.patient_id or not req.message:
         raise HTTPException(status_code=400, detail="patient_id and message are required")
 
-    client = get_gemini_client()
-
-    # Convert history to Gemini format
-    new_sdk_history = []
-    for h in req.history:
-        role = "user" if h.role == "user" else "model"
-        new_sdk_history.append(
-            types.Content(role=role, parts=[types.Part(text=h.content)])
-        )
-
-    # Gemini requires history to start with a "user" turn — strip any leading "model" messages
-    # (the frontend always includes the hardcoded assistant greeting in history)
-    while new_sdk_history and new_sdk_history[0].role != "user":
-        new_sdk_history.pop(0)
-
-    chat_session = client.chats.create(
-        model="gemini-2.5-flash",
-        history=new_sdk_history,
-        config=types.GenerateContentConfig(
-            system_instruction=TRIAGE_SYSTEM_PROMPT,
-            temperature=0.2,
-            response_mime_type="application/json",
-            max_output_tokens=1500,
-        ),
-    )
-
     response_text = None
+    provider = None
+    new_sdk_history = _gemini_history(req.history)
+
     try:
-        result = chat_session.send_message(req.message)
-        response_text = result.text
+        client = get_gemini_client()
     except Exception as e:
-        status_code = getattr(e, "code", 500)
-        if status_code in (429, 500, 502, 503, 504) or isinstance(e, ClientError):
-            print(f"Gemini unavailable ({status_code}). Falling back to Groq...")
-            groq_client = get_groq_client()
-            if groq_client:
-                messages = [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}]
-                for h in req.history:
-                    messages.append({"role": "user" if h.role == "user" else "assistant", "content": h.content})
-                messages.append({"role": "user", "content": req.message})
+        print(f"Gemini client unavailable: {e}")
+        client = None
+
+    if client:
+        for model in _configured_models(
+            "GEMINI_CHAT_MODELS",
+            ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"],
+        ):
+            try:
+                chat_session = client.chats.create(
+                    model=model,
+                    history=new_sdk_history,
+                    config=types.GenerateContentConfig(
+                        system_instruction=TRIAGE_SYSTEM_PROMPT,
+                        temperature=0.2,
+                        response_mime_type="application/json",
+                        max_output_tokens=1500,
+                    ),
+                )
+                result = await asyncio.to_thread(chat_session.send_message, req.message)
+                response_text = result.text
+                provider = f"gemini:{model}"
+                break
+            except Exception as e:
+                print(f"Gemini model {model} unavailable ({getattr(e, 'code', 'error')}): {e}")
+
+    if not response_text:
+        groq_client = get_groq_client()
+        if groq_client:
+            messages = [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}]
+            for h in req.history:
+                if h.content.strip():
+                    messages.append({
+                        "role": "user" if h.role == "user" else "assistant",
+                        "content": h.content,
+                    })
+            messages.append({"role": "user", "content": req.message})
+            for model in _configured_models(
+                "GROQ_CHAT_MODELS",
+                ["openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+            ):
                 try:
-                    completion = groq_client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
+                    completion = await asyncio.to_thread(
+                        groq_client.chat.completions.create,
+                        model=model,
                         messages=messages,
                         temperature=0.2,
                         response_format={"type": "json_object"},
                     )
                     response_text = completion.choices[0].message.content
-                except Exception as groq_e:
-                    print(f"Groq fallback also failed: {groq_e}")
-                    raise HTTPException(status_code=500, detail="Failed to process triage request (both AI services down).")
-            else:
-                raise HTTPException(status_code=500, detail="Gemini failed and Groq API key is not configured.")
-        else:
-            print(f"Error calling Gemini: {e}")
-            raise HTTPException(status_code=500, detail="Failed to process triage request.")
+                    provider = f"groq:{model}"
+                    break
+                except Exception as e:
+                    print(f"Groq model {model} unavailable: {e}")
 
-    if not response_text:
-        raise HTTPException(status_code=500, detail="Failed to get valid response from AI.")
-
-    # Parse JSON
-    try:
-        response_json = json.loads(re.sub(r"```json\n?|\n?```", "", response_text).strip())
-    except Exception:
-        json_match = re.search(r"\{[\s\S]*\}", response_text)
-        if json_match:
+    if response_text:
+        try:
+            response_json = json.loads(re.sub(r"```json\n?|\n?```", "", response_text).strip())
+        except Exception:
+            json_match = re.search(r"\{[\s\S]*\}", response_text)
             try:
-                response_json = json.loads(json_match.group(0))
+                response_json = json.loads(json_match.group(0)) if json_match else {}
             except Exception:
                 response_json = {}
+        if not isinstance(response_json, dict) or not response_json.get("response"):
+            response_json = _local_triage_response(req)
         else:
-            response_json = {}
+            response_json["ai_status"] = "available"
+            response_json["ai_provider"] = provider
+    else:
+        print("All configured AI providers failed; using safe local triage fallback.")
+        response_json = _local_triage_response(req)
 
     # Ensure all keys exist
     response_json.setdefault("response", "I'm having trouble understanding. Could you describe your symptoms again?")

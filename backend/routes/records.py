@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
 
-from services.insforge import db_select, db_delete, db_update, db_insert, db_select_single
+from services.insforge import db_select, db_delete, db_update, db_update_where, db_insert, db_select_single
 from services.vault import encrypt_secret, decrypt_secret
 
 router = APIRouter()
@@ -229,46 +229,20 @@ class RevokeAccessRequest(BaseModel):
 async def revoke_access(payload: RevokeAccessRequest):
     try:
         from datetime import datetime, timezone
-        import os
 
-        base_url = os.getenv("INSFORGE_BASE_URL", "")
-        service_key = os.getenv("INSFORGE_SERVICE_KEY", "")
+        updated = await db_update_where(
+            "access_grants",
+            filters={
+                "analysis_id": payload.analysis_id,
+                "doctor_wallet": payload.doctor_wallet,
+                "is_active": "true",
+            },
+            payload={
+                "is_active": False,
+                "revoked_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
-        if not base_url or not service_key:
-            # Fall back to local DB: find matching rows and mark them inactive
-            from services.insforge import _load_local_db, _save_local_db
-            data = _load_local_db()
-            rows = data.get("access_grants", [])
-            now = datetime.now(timezone.utc).isoformat()
-            for row in rows:
-                if (str(row.get("analysis_id")) == str(payload.analysis_id)
-                        and str(row.get("doctor_wallet")) == str(payload.doctor_wallet)):
-                    row["is_active"] = False
-                    row["revoked_at"] = now
-            _save_local_db(data)
-            return {"success": True}
-
-        # Use InsForge PostgREST API with compound filters
-        url = f"{base_url}/api/database/records/access_grants"
-        params = {
-            "analysis_id": f"eq.{payload.analysis_id}",
-            "doctor_wallet": f"eq.{payload.doctor_wallet}",
-        }
-        headers = {
-            "apikey": service_key,
-            "Authorization": f"Bearer {service_key}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-        }
-        update_payload = {
-            "is_active": False,
-            "revoked_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.patch(url, json=update_payload, params=params, headers=headers)
-            resp.raise_for_status()
-
-        return {"success": True}
+        return {"success": True, "revoked_count": len(updated)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to revoke access: {str(e)}")

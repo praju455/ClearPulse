@@ -124,6 +124,20 @@ def _local_update(table: str, row_id: str, payload: dict) -> dict:
     raise KeyError(f"Local row not found in {table}: {row_id}")
 
 
+def _local_update_where(table: str, filters: dict, payload: dict) -> list:
+    data = _load_local_db()
+    rows = data.setdefault(table, [])
+    updated = []
+    for row in rows:
+        if _matches_filters(row, filters):
+            row.update(deepcopy(payload))
+            row["updated_at"] = payload.get("updated_at", datetime.now(timezone.utc).isoformat())
+            updated.append(deepcopy(row))
+    if updated:
+        _save_local_db(data)
+    return updated
+
+
 def _local_delete(table: str, row_id: str) -> None:
     data = _load_local_db()
     rows = data.setdefault(table, [])
@@ -257,6 +271,34 @@ async def db_update(table: str, row_id: str, payload: dict) -> dict:
     except Exception as e:
         _fallback_or_raise(e, "update", table)
         return _local_update(table, row_id, payload)
+
+
+async def db_update_where(table: str, filters: dict, payload: dict) -> list:
+    """Update every row matching compound filters and return those rows."""
+    if not filters:
+        raise ValueError("At least one update filter is required")
+
+    if not INSFORGE_BASE_URL or not INSFORGE_SERVICE_KEY or _should_use_local_now():
+        return _local_update_where(table, filters, payload)
+
+    url = f"{INSFORGE_BASE_URL}/api/database/records/{table}"
+    params = {key: f"eq.{value}" for key, value in filters.items()}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.patch(url, json=payload, params=params, headers=_headers())
+            if not resp.is_success:
+                raise httpx.HTTPStatusError(
+                    f"Database update failed with {resp.status_code}: {resp.text}",
+                    request=resp.request,
+                    response=resp,
+                )
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            return [data] if data else []
+    except Exception as e:
+        _fallback_or_raise(e, "filtered update", table)
+        return _local_update_where(table, filters, payload)
 
 
 async def db_delete(table: str, row_id: str) -> None:

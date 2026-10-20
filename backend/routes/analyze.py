@@ -1,10 +1,11 @@
-
-import hashlib
-import json
-import re
-import base64
-import logging
 import asyncio
+import base64
+import hashlib
+import io
+import json
+import logging
+import os
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -14,7 +15,6 @@ from services.gemini import get_gemini_client
 from services.groq_client import get_groq_client
 from services.insforge import db_insert
 from google.genai import types
-from google.genai.errors import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -28,130 +28,72 @@ class AnalyzeRequest(BaseModel):
     file_name: str = "report"
 
 
-def _fallback_analysis_from_text(file_bytes: bytes, file_type: str) -> dict:
-    text = ""
+def _configured_models(env_name: str, defaults: list[str]) -> list[str]:
+    configured = os.getenv(env_name, "")
+    candidates = configured.split(",") if configured else defaults
+    return list(dict.fromkeys(model.strip() for model in candidates if model.strip()))
+
+
+def _extract_report_text(file_bytes: bytes, file_type: str) -> str:
     if file_type.startswith("text/"):
-        text = file_bytes.decode("utf-8", errors="ignore").strip()
-
-    preview = re.sub(r"\s+", " ", text)[:900]
-    summary = (
-        "The AI analysis service is temporarily overloaded, so MediChain saved a basic review placeholder for this upload. "
-        "Please retry analysis later for a full medical summary. "
-        "Do not use this placeholder as medical advice."
-    )
-    if preview:
-        summary += f" Extracted report preview: {preview}"
-
-    return {
-        "summary": summary,
-        "risk_score": 50,
-        "conditions": ["AI analysis temporarily unavailable"],
-        "biomarkers": {},
-        "specialist": "General Practitioner",
-        "urgency": "medium",
-        "improvement_plan": [
-            "Retry the AI analysis in a few minutes.",
-            "Share urgent or concerning results with a qualified clinician.",
-            "Keep the original report available for medical review.",
-        ],
-    }
+        return file_bytes.decode("utf-8", errors="ignore").strip()
+    if file_type == "application/pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(file_bytes))
+            return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        except Exception as error:
+            logger.warning("PDF text extraction failed: %s", error)
+    return ""
 
 
 async def _generate_analysis_with_retries(client, prompt: str, file_bytes: bytes, file_type: str):
-    # Updated to valid model names and fewer retries to fail over faster
-    models = ["gemini-2.5-flash", "gemini-2.0-flash"]
     last_error = None
 
-    for model in models:
-        for attempt in range(1): # Reduced to 1 attempt per model for speed
+    if client:
+        for model in _configured_models(
+            "GEMINI_ANALYSIS_MODELS",
+            ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"],
+        ):
             try:
-                return client.models.generate_content(
+                return await asyncio.to_thread(
+                    client.models.generate_content,
                     model=model,
-                    contents=[
-                        prompt,
-                        types.Part.from_bytes(data=file_bytes, mime_type=file_type),
-                    ],
+                    contents=[prompt, types.Part.from_bytes(data=file_bytes, mime_type=file_type)],
                 )
-            except ClientError as e:
-                last_error = e
-                status_code = getattr(e, "code", 500)
-                error_msg = str(getattr(e, 'message', str(e))).lower()
-                # Always fall through to Groq — don't re-raise for location/quota/model errors
-                if status_code in (429, 500, 502, 503, 504):
-                    await asyncio.sleep(0.5)
-                elif 'location' in error_msg or 'not supported' in error_msg or status_code == 400:
-                    logger.warning(f"[Gemini] Skipping model {model}: {error_msg}")
-                else:
-                    logger.warning(f"[Gemini] ClientError {status_code} on {model}: {error_msg}")
-                continue
             except Exception as e:
                 last_error = e
-                logger.warning(f"[Gemini] Unexpected error on {model}: {e}")
-                await asyncio.sleep(0.5)
+                logger.warning("[Gemini] Model %s failed: %s", model, e)
 
     # Groq Fallback
     groq_client = get_groq_client()
     if groq_client:
         logger.warning("Gemini failed after retries. Falling back to Groq...")
-        try:
-            # Handle PDF text extraction if it's a PDF
-            extracted_text = ""
-            if file_type == "application/pdf":
+        extracted_text = _extract_report_text(file_bytes, file_type)
+        if extracted_text:
+            content = f"{prompt}\n\n--- EXTRACTED REPORT TEXT ---\n{extracted_text}"
+            for model in _configured_models(
+                "GROQ_ANALYSIS_MODELS",
+                ["openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+            ):
                 try:
-                    import io
-                    from pypdf import PdfReader
-                    reader = PdfReader(io.BytesIO(file_bytes))
-                    extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-                except Exception as pdf_e:
-                    logger.error(f"PDF text extraction failed: {pdf_e}")
+                    completion = await asyncio.to_thread(
+                        groq_client.chat.completions.create,
+                        model=model,
+                        messages=[{"role": "user", "content": content}],
+                        temperature=0.2,
+                        response_format={"type": "json_object"},
+                    )
 
-            # Choose model based on content
-            is_image = file_type.startswith("image/")
-            
-            if is_image:
-                # Use Groq Vision for images
-                b64_data = base64.b64encode(file_bytes).decode("utf-8")
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{file_type};base64,{b64_data}"
-                                }
-                            }
-                        ]
-                    }
-                ]
-                model = "llama-3.2-11b-vision-preview"
-            else:
-                # Use text-only LLM for PDFs (with extracted text) or text files
-                content = prompt
-                if extracted_text:
-                    content += f"\n\n--- EXTRACTED REPORT TEXT ---\n{extracted_text}"
-                elif file_type.startswith("text/"):
-                    content += f"\n\n--- REPORT TEXT ---\n{file_bytes.decode('utf-8', errors='ignore')}"
-                
-                messages = [
-                    {"role": "user", "content": content}
-                ]
-                model = "llama-3.3-70b-versatile"
+                    class MockResult:
+                        text = completion.choices[0].message.content
 
-            completion = groq_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
-            
-            class MockResult:
-                text = completion.choices[0].message.content
-            return MockResult()
-            
-        except Exception as groq_e:
-            logger.error(f"Groq fallback failed: {groq_e}")
+                    return MockResult()
+                except Exception as groq_error:
+                    last_error = groq_error
+                    logger.warning("[Groq] Model %s failed: %s", model, groq_error)
+        else:
+            logger.warning("Groq fallback skipped because no text could be extracted from the report.")
 
     raise last_error or RuntimeError("AI service unavailable")
 
@@ -160,8 +102,6 @@ async def _generate_analysis_with_retries(client, prompt: str, file_bytes: bytes
 async def analyze_report(req: AnalyzeRequest):
     if not req.file_base64 or not req.patient_wallet:
         raise HTTPException(status_code=400, detail="file_base64 and patient_wallet are required")
-
-    client = get_gemini_client()
 
     prompt = """You are a professional medical analysis AI assistant. Analyze the provided medical report and return a structured JSON response.
 You are NOT replacing a doctor.
@@ -180,41 +120,33 @@ Ensure risk_score is a number. Extract biomarkers as key-value pairs where possi
 
     file_bytes = base64.b64decode(req.file_base64)
 
-    used_ai_fallback = False
-
     try:
-        response = await _generate_analysis_with_retries(client, prompt, file_bytes, req.file_type)
-    except ClientError as e:
-        status_code = getattr(e, "code", 500)
-        error_msg = str(getattr(e, 'message', str(e)))
-        logger.warning("Gemini error (using fallback): [%s] %s", status_code, error_msg)
-        response = None
-        used_ai_fallback = True
-    except Exception as e:
-        logger.warning("Failed to communicate with AI service (using fallback): %s", e)
-        response = None
-        used_ai_fallback = True
-
-    response_text = response.text if response is not None else ""
-
-    if used_ai_fallback:
-        analysis = _fallback_analysis_from_text(file_bytes, req.file_type)
-    else:
-        # Parse JSON safely
         try:
-            cleaned = re.sub(r"```json\n?|\n?```", "", response_text).strip()
-            json_match = re.search(r"\{[\s\S]*\}", cleaned)
-            analysis = json.loads(json_match.group(0) if json_match else cleaned)
-        except Exception:
-            analysis = {
-                "summary": "Analysis completed but format was invalid. Please review the raw report manually.",
-                "risk_score": 50,
-                "conditions": ["Formatted extraction failed"],
-                "biomarkers": {},
-                "specialist": "General Practitioner",
-                "urgency": "low",
-                "improvement_plan": ["Please consult a healthcare professional for a tailored improvement plan."]
-            }
+            client = get_gemini_client()
+        except Exception as client_error:
+            logger.warning("Gemini client unavailable: %s", client_error)
+            client = None
+        response = await _generate_analysis_with_retries(client, prompt, file_bytes, req.file_type)
+    except Exception as e:
+        logger.error("All report-analysis providers failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Report analysis is temporarily unavailable. The report was not saved with a placeholder; please retry shortly.",
+        )
+
+    response_text = response.text or ""
+    try:
+        cleaned = re.sub(r"```json\n?|\n?```", "", response_text).strip()
+        json_match = re.search(r"\{[\s\S]*\}", cleaned)
+        analysis = json.loads(json_match.group(0) if json_match else cleaned)
+        if not isinstance(analysis, dict) or not analysis.get("summary"):
+            raise ValueError("AI response did not contain a usable analysis")
+    except Exception as parse_error:
+        logger.error("Report analysis returned invalid JSON: %s", parse_error)
+        raise HTTPException(
+            status_code=502,
+            detail="The analysis provider returned an invalid result. The report was not saved; please retry.",
+        )
 
     # SHA-256 hash of the analysis result
     hash_payload = json.dumps(analysis).encode()
@@ -250,7 +182,7 @@ Ensure risk_score is a number. Extract biomarkers as key-value pairs where possi
         "success": True,
         "service_status": service_status,
         "message": service_message,
-        "ai_status": "temporarily_unavailable" if used_ai_fallback else "available",
+        "ai_status": "available",
         "analysis": {
             "id": db_record.get("id") if db_record else None,
             "file_name": req.file_name,
