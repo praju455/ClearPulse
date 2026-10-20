@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from routes import analyze, records, triage
+from routes import analyze, chatbot, records, triage
 from services import insforge
 
 
@@ -38,6 +38,59 @@ class TriageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["triage_level"], "Assessing")
         self.assertEqual(result["ai_status"], "safe_fallback")
         self.assertIn("temperature", result["response"].lower())
+
+
+class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
+    def test_history_drops_leading_assistant_and_merges_duplicate_roles(self):
+        history = chatbot._gemini_history([
+            {"role": "assistant", "message": "Most recent reply"},
+            {"role": "user", "message": "Second question"},
+            {"role": "user", "message": "First question"},
+            {"role": "assistant", "message": "Welcome"},
+        ])
+
+        self.assertEqual([message.role for message in history], ["user", "model"])
+        self.assertEqual(history[0].parts[0].text, "First question\nSecond question")
+
+    def test_report_context_handles_missing_and_string_conditions(self):
+        context = chatbot._analysis_context([
+            {"summary": None, "conditions": "Hypertension", "risk_score": None},
+        ])
+
+        self.assertIn("Hypertension", context)
+
+    async def test_chat_returns_safe_response_when_all_ai_providers_fail(self):
+        request = chatbot.ChatRequest(
+            patient_wallet="patient-test",
+            message="I have a fever",
+        )
+        with (
+            patch.object(chatbot, "_fetch_context", new=AsyncMock(return_value=([], []))),
+            patch.object(chatbot, "get_gemini_client", side_effect=RuntimeError("no key")),
+            patch.object(chatbot, "get_groq_client", return_value=None),
+            patch.object(chatbot, "db_insert", new=AsyncMock()),
+        ):
+            result = await chatbot.chat(request)
+
+        self.assertEqual(result["ai_status"], "safe_fallback")
+        self.assertIn("fever", result["answer"].lower())
+        self.assertIn("informational", result["warning"].lower())
+
+    async def test_chat_escalates_emergency_terms_without_ai(self):
+        request = chatbot.ChatRequest(
+            patient_wallet="patient-test",
+            message="I have chest pain and cannot breathe",
+        )
+        with (
+            patch.object(chatbot, "_fetch_context", new=AsyncMock(return_value=([], []))),
+            patch.object(chatbot, "get_gemini_client", side_effect=RuntimeError("no key")),
+            patch.object(chatbot, "get_groq_client", return_value=None),
+            patch.object(chatbot, "db_insert", new=AsyncMock()),
+        ):
+            result = await chatbot.chat(request)
+
+        self.assertEqual(result["ai_status"], "safe_fallback")
+        self.assertIn("112", result["answer"])
 
 
 class AccessGrantTests(unittest.IsolatedAsyncioTestCase):
