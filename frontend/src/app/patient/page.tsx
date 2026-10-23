@@ -28,7 +28,7 @@ import AppointmentsView from './components/AppointmentsView';
 import HealthView from './components/HealthView';
 import DigitalTwin from '@/components/DigitalTwin';
 import TriagePanel from './components/TriagePanel';
-import { generateEncryptionKey, encryptFile, decryptFileFromIPFS } from '@/lib/encryption';
+import { generateEncryptionKey, encryptFile, decryptFileFromIPFS, getMimeTypeFromFileName } from '@/lib/encryption';
 import { uploadToIPFS, isIPFSConfigured } from '@/lib/ipfs';
 
 // ... (Interface declarations identical to original) ...
@@ -424,7 +424,8 @@ export default function PatientDashboard() {
 
         try {
             setUploadStatus('🔓 Decrypting document...');
-            const blob = await decryptFileFromIPFS(cid, key, iv);
+            const mimeType = getMimeTypeFromFileName(selectedRecord.file_name);
+            const blob = await decryptFileFromIPFS(cid, key, iv, mimeType);
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
         } catch (err: any) {

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import RiskScore from '@/components/RiskScore';
-import { decryptFileFromIPFS } from '@/lib/encryption';
+import { decryptFileFromIPFS, getMimeTypeFromFileName } from '@/lib/encryption';
 
 interface Analysis {
     id: string;
@@ -38,7 +38,7 @@ export default function AnalysisView({ record }: AnalysisViewProps) {
             return;
         }
 
-        const keyToUse = record.encryption_key || manualKey;
+        const keyToUse = (record.encryption_key || manualKey).trim();
 
         if (!keyToUse) {
             setStatus('⚠️ Please enter your decryption key above.');
@@ -47,13 +47,19 @@ export default function AnalysisView({ record }: AnalysisViewProps) {
 
         try {
             setStatus('🔓 Decrypting document...');
-            const blob = await decryptFileFromIPFS(record.ipfs_cid, keyToUse, record.encryption_iv || '');
+            const mimeType = getMimeTypeFromFileName(record.file_name);
+            const blob = await decryptFileFromIPFS(
+                record.ipfs_cid,
+                keyToUse,
+                record.encryption_iv || '',
+                mimeType,
+            );
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
             setStatus('');
         } catch (err: any) {
             console.error('Decryption failed:', err);
-            setStatus(`❌ Wrong decryption key. Please check and try again.`);
+            setStatus(`❌ ${err.message || 'Unable to decrypt this report. Please check the key and try again.'}`);
         }
     };
 

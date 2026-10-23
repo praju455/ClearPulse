@@ -7,13 +7,50 @@
 
 import CryptoJS from 'crypto-js';
 
+const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
+    pdf: 'application/pdf',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+};
+
+/** Infer the browser content type for the report formats accepted by the uploader. */
+export function getMimeTypeFromFileName(fileName: string): string {
+    const extension = fileName.split('.').pop()?.toLowerCase() || '';
+    return MIME_TYPES_BY_EXTENSION[extension] || 'application/octet-stream';
+}
+
+function detectMimeType(bytes: Uint8Array): string | null {
+    if (bytes.length >= 5 && String.fromCharCode(...bytes.slice(0, 5)) === '%PDF-') {
+        return 'application/pdf';
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        return 'image/jpeg';
+    }
+    if (
+        bytes.length >= 8 &&
+        bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+        bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+    ) {
+        return 'image/png';
+    }
+    if (
+        bytes.length >= 12 &&
+        String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' &&
+        String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP'
+    ) {
+        return 'image/webp';
+    }
+    return null;
+}
+
 /**
  * Generate a cryptographically random encryption key (256-bit).
  * Returns a hex string.
  */
 export function generateEncryptionKey(): string {
-    const keySize = 256 / 32; // 8 words = 256 bits
-    const key = CryptoJS.lib.WordArray.random(keySize);
+    const key = CryptoJS.lib.WordArray.random(32); // CryptoJS expects bytes: 32 bytes = 256 bits
     return key.toString(CryptoJS.enc.Hex);
 }
 
@@ -101,7 +138,24 @@ export async function encryptFile(file: File, key: string): Promise<{ encryptedB
 /**
  * Fetch a file from IPFS, decrypt it, and return a Blob.
  */
-export async function decryptFileFromIPFS(cid: string, key: string, iv: string, mimeType: string = 'application/pdf'): Promise<Blob> {
+export async function decryptFileFromIPFS(
+    cid: string,
+    key: string,
+    iv: string,
+    mimeType: string = 'application/octet-stream',
+): Promise<Blob> {
+    const normalizedKey = key.trim();
+    const normalizedIv = iv.trim();
+    // Keys generated before this fix were accidentally 8 bytes (16 hex
+    // characters). Continue accepting them so existing encrypted reports open,
+    // while all newly generated keys are the intended 256-bit length.
+    if (!/^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{64})$/.test(normalizedKey)) {
+        throw new Error('The decryption key format is invalid.');
+    }
+    if (!/^[0-9a-fA-F]{32}$/.test(normalizedIv)) {
+        throw new Error('This record has an invalid encryption IV and cannot be decrypted.');
+    }
+
     // 1. Fetch from IPFS (using public gateway for now, or configured one)
     const gateway = "https://gateway.pinata.cloud/ipfs";
     const response = await fetch(`${gateway}/${cid}`);
@@ -110,11 +164,14 @@ export async function decryptFileFromIPFS(cid: string, key: string, iv: string, 
         throw new Error(`Failed to fetch from IPFS: ${response.statusText}`);
     }
 
-    const ciphertext = await response.text();
+    const ciphertext = (await response.text()).trim();
+    if (!ciphertext) {
+        throw new Error('The encrypted report downloaded from IPFS is empty.');
+    }
 
     // 2. Decrypt
-    const decryptedArgs = CryptoJS.AES.decrypt(ciphertext, CryptoJS.enc.Hex.parse(key), {
-        iv: CryptoJS.enc.Hex.parse(iv),
+    const decryptedArgs = CryptoJS.AES.decrypt(ciphertext, CryptoJS.enc.Hex.parse(normalizedKey), {
+        iv: CryptoJS.enc.Hex.parse(normalizedIv),
         mode: CryptoJS.mode.CBC,
         padding: CryptoJS.pad.Pkcs7,
     });
@@ -122,11 +179,24 @@ export async function decryptFileFromIPFS(cid: string, key: string, iv: string, 
     // 3. Convert to TypedArray
     const words = decryptedArgs.words;
     const sigBytes = decryptedArgs.sigBytes;
+    if (sigBytes <= 0) {
+        throw new Error('The decryption key is incorrect or the encrypted report is corrupted.');
+    }
+
     const u8 = new Uint8Array(sigBytes);
     for (let i = 0; i < sigBytes; i++) {
         u8[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
     }
 
-    // 4. Create Blob
-    return new Blob([u8], { type: mimeType });
+    // 4. Verify the decrypted file and use its real content type. This prevents
+    // images from being sent to Chrome's PDF viewer as application/pdf.
+    const detectedMimeType = detectMimeType(u8);
+    if (!detectedMimeType) {
+        throw new Error('The decryption key is incorrect or the report format is unsupported.');
+    }
+    if (mimeType !== 'application/octet-stream' && detectedMimeType !== mimeType) {
+        throw new Error('The decrypted file does not match the original report type.');
+    }
+
+    return new Blob([u8], { type: detectedMimeType });
 }
